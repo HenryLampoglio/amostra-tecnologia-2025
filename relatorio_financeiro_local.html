@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Relatório Financeiro (Local)</title>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dayjs@1.11.10/dayjs.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      .figure { width: 100%; height: 440px; }
+    </style>
+  </head>
+  <body class="bg-gray-50 text-gray-800">
+    <div class="max-w-6xl mx-auto p-6">
+      <h1 class="text-2xl font-bold mb-2">Relatório Financeiro Local</h1>
+      <p class="text-sm text-gray-600">Carregue o arquivo CSV do seu computador para gerar o relatório com gráficos. Nada é enviado para a internet.</p>
+
+      <div class="bg-white border border-gray-200 rounded-xl p-4 my-4 shadow-sm">
+        <div class="flex flex-wrap gap-3 items-center">
+          <input type="file" id="file" accept=".csv" class="border border-gray-300 rounded-lg p-2" />
+          <label for="period" class="text-sm text-gray-700">Agrupar por:</label>
+          <select id="period" class="border border-gray-300 rounded-lg p-2">
+            <option value="mensal">Mensal</option>
+            <option value="bimestral">Bimestral</option>
+            <option value="semestral">Semestral</option>
+          </select>
+          <label for="payment" class="text-sm text-gray-700">Forma de pagamento:</label>
+          <select id="payment" class="border border-gray-300 rounded-lg p-2" disabled>
+            <option value="all">Todas</option>
+          </select>
+          <button id="btn" disabled class="px-4 py-2 rounded-lg border border-gray-200 bg-gray-900 text-white disabled:bg-gray-400">Gerar Relatório</button>
+        </div>
+        <p id="status" class="text-sm text-gray-500 mt-2"></p>
+      </div>
+
+      <div id="content" style="display:none">
+        <div class="bg-white border border-gray-200 rounded-xl p-4 mb-4 shadow-sm">
+          <h2 class="text-xl font-semibold mb-2">Resumo</h2>
+          <div id="resumo"></div>
+          <h3 class="text-lg font-medium mt-4">Balanço Mensal</h3>
+          <div id="tabela_mensal"></div>
+        </div>
+
+        <div class="bg-white border border-gray-200 rounded-xl p-4 shadow-sm">
+          <h2 class="text-xl font-semibold mb-4">Gráficos</h2>
+          <div id="fig_mensal" class="figure"></div>
+          <div id="fig_receita_serv" class="figure"></div>
+          <div id="fig_pagto_rec" class="figure"></div>
+          <div id="fig_pagto_desp" class="figure"></div>
+          <div id="fig_status" class="figure"></div>
+          <div id="fig_top_desp" class="figure"></div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const monthAbbr = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
+      const PERIOD_CONFIG = {
+        mensal: { label: 'Mensal', size: 1 },
+        bimestral: { label: 'Bimestral', size: 2 },
+        semestral: { label: 'Semestral', size: 6 }
+      };
+
+      const fileInput = document.getElementById('file');
+      const periodSelect = document.getElementById('period');
+      const paymentSelect = document.getElementById('payment');
+      const btn = document.getElementById('btn');
+      const statusEl = document.getElementById('status');
+
+      function normalizeHeader(h){ return String(h||'').trim().replace(/\s+/g,'_'); }
+      function pick(dfCols, options){ for(const opt of options){ const n=normalizeHeader(opt); if(dfCols.includes(n)) return n; } return null; }
+      function htmlEscape(s){ return String(s).replace(/[&<>"']/g,(c)=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c])); }
+
+      function parseCSV(file){
+        return new Promise((resolve, reject)=>{
+          Papa.parse(file, { header:true, skipEmptyLines:true, complete: res=>{
+            if(res.errors && res.errors.length){ reject(res.errors[0].message); return; }
+            const cols = res.meta.fields.map(normalizeHeader);
+            const rows = res.data.map(r=>{
+              const obj={};
+              res.meta.fields.forEach((orig, idx)=>{ obj[cols[idx]] = r[orig]; });
+              return obj;
+            });
+            resolve({cols, rows});
+          }, error: err=>reject(err)});
+        });
+      }
+
+      function loadData(cols, rows){
+        const colMapOpts = {
+          data: ['Data','date'],
+          descricao: ['Descricao','Descrição','Service','Servico'],
+          categoria: ['Categoria','Tipo'],
+          valor: ['Valor (R$)','Valor','Valor R$','Valor  R$ '],
+          forma_pagto: ['Forma_de_Pagamento','FormaPagamento','Pagamento'],
+          status: ['Status']
+        };
+        const found = Object.fromEntries(Object.entries(colMapOpts).map(([k,opts])=>[k, pick(cols, opts)]));
+        if(!found.data) throw new Error("Coluna de data não encontrada (ex.: 'Data').");
+        let valorCol = found.valor || (cols.find(c=>/valor/i.test(c)) || null);
+        if(!valorCol) throw new Error("Coluna de valor não encontrada (ex.: 'Valor (R$)').");
+
+        const df = rows.map(r=>{
+          const d = dayjs(r[found.data]);
+          if(!d.isValid()) return null;
+          const valor = parseFloat(String(r[valorCol]).replace(',', '.'));
+          return {
+            data: d.toDate(),
+            valor: isNaN(valor)?0:valor,
+            descricao: found.descricao ? String(r[found.descricao]||'').trim() : '',
+            categoria: found.categoria ? String(r[found.categoria]||'').trim() : '',
+            forma_pagto: found.forma_pagto ? String(r[found.forma_pagto]||'').trim() : '',
+            status: found.status ? String(r[found.status]||'').trim() : ''
+          };
+        }).filter(Boolean);
+
+        function inferTipo(row){
+          const cat = (row.categoria||'').toLowerCase();
+          if(cat.startsWith('receita')) return 'Receita';
+          if(cat.startsWith('despesa')) return 'Despesa';
+          return row.valor >= 0 ? 'Receita' : 'Despesa';
+        }
+
+        df.forEach(r=>{
+          r.tipo = inferTipo(r);
+          r.valor_abs = Math.abs(r.valor);
+          r.ano = r.data.getFullYear();
+          r.mes = r.data.getMonth()+1;
+          r.mes_nome = `${monthAbbr[r.mes-1]}/${String(r.ano).slice(-2)}`;
+        });
+        return df;
+      }
+
+      function groupBy(arr, keyFn){ return arr.reduce((acc,it)=>{ const k=keyFn(it); (acc[k]=acc[k]||[]).push(it); return acc; },{}); }
+      function sum(arr, sel){ return arr.reduce((s,x)=>s+sel(x),0); }
+
+      function buildPeriodSeries(df, periodCfg){
+        const groups = {};
+        const size = periodCfg.size;
+        df.forEach(row=>{
+          const monthIndex = row.mes - 1;
+          const bucketIndex = Math.floor(monthIndex / size);
+          const startMonthIndex = bucketIndex * size;
+          const endMonthIndex = Math.min(startMonthIndex + size - 1, 11);
+          const key = `${row.ano}-${bucketIndex}`;
+          if(!groups[key]){
+            groups[key] = { ano: row.ano, bucketIndex, startMonthIndex, endMonthIndex, rows: [] };
+          }
+          groups[key].rows.push(row);
+        });
+
+        return Object.values(groups).map(group=>{
+          const receitas = group.rows.filter(r=>r.tipo==='Receita');
+          const despesas = group.rows.filter(r=>r.tipo==='Despesa');
+          const receita = sum(receitas, x=>x.valor);
+          const despesa = sum(despesas, x=>-x.valor);
+          const anoCurto = String(group.ano).slice(-2);
+          const label = periodCfg.size===1
+            ? (group.rows[0]?.mes_nome || `${monthAbbr[group.startMonthIndex]}/${anoCurto}`)
+            : `${monthAbbr[group.startMonthIndex]}/${anoCurto} - ${monthAbbr[group.endMonthIndex]}/${anoCurto}`;
+          return {
+            ano: group.ano,
+            indice: group.bucketIndex,
+            label,
+            receita,
+            despesa,
+            saldo: receita - despesa
+          };
+        }).sort((a,b)=> a.ano-b.ano || a.indice-b.indice);
+      }
+
+      function computeKPIs(df, periodSlug='mensal'){
+        const receitas = df.filter(r=>r.tipo==='Receita');
+        const despesas = df.filter(r=>r.tipo==='Despesa');
+        const total_receita = sum(receitas, x=>x.valor);
+        const total_despesa = sum(despesas, x=>-x.valor);
+        const resultado = total_receita - total_despesa;
+        const periodKey = PERIOD_CONFIG[periodSlug] ? periodSlug : 'mensal';
+        const periodCfg = PERIOD_CONFIG[periodKey];
+        const periodos = buildPeriodSeries(df, periodCfg);
+        return { total_receita, total_despesa, resultado, periodos, periodo: { slug: periodKey, label: periodCfg.label, tamanho: periodCfg.size } };
+      }
+
+      function buildFiguresData(df, kpis){
+        const figs = {};
+        figs.periodos = { x: kpis.periodos.map(m=>m.label), receita: kpis.periodos.map(m=>m.receita), despesa: kpis.periodos.map(m=>m.despesa), saldo: kpis.periodos.map(m=>m.saldo) };
+        const recServ = Object.entries(groupBy(df.filter(r=>r.tipo==='Receita'), r=> r.descricao || 'Sem descrição')).map(([descricao, items])=>({ descricao, valor: sum(items,x=>x.valor) })).sort((a,b)=>b.valor-a.valor);
+        figs.receita_por_servico = recServ;
+        const frmRec = Object.entries(groupBy(df.filter(r=>r.tipo==='Receita'), r=> r.forma_pagto || 'Indefinido')).map(([forma_pagto, items])=>({ forma_pagto, valor: sum(items,x=>x.valor) }));
+        const frmDesp = Object.entries(groupBy(df.filter(r=>r.tipo==='Despesa'), r=> r.forma_pagto || 'Indefinido')).map(([forma_pagto, items])=>({ forma_pagto, valor_abs: sum(items,x=>x.valor_abs) }));
+        figs.pagto_receita = frmRec;
+        figs.pagto_despesa = frmDesp;
+        const status = Object.entries(groupBy(df, r=> `${r.status||'Sem status'}|${r.tipo}`)).map(([k, items])=>{ const [status, tipo] = k.split('|'); return { status, tipo, qtd: items.length }; });
+        figs.status = status;
+        const topDespesas = df.filter(r=>r.tipo==='Despesa').map(r=>({ label: `${r.descricao || r.categoria || 'Despesa'} - ${dayjs(r.data).format('DD/MM/YYYY')}`, valor_abs: r.valor_abs })).sort((a,b)=>b.valor_abs-a.valor_abs).slice(0,15);
+        figs.top_despesas = topDespesas;
+        return figs;
+      }
+
+      function renderHTML(df, kpis, figs, filters){
+        document.getElementById('content').style.display = '';
+        const resumo = `
+          <ul>
+            <li><strong>Receita Total:</strong> R$ ${kpis.total_receita.toFixed(2)}</li>
+            <li><strong>Despesas Totais:</strong> R$ ${kpis.total_despesa.toFixed(2)}</li>
+            <li><strong>Resultado:</strong> <strong style="color:${kpis.resultado>=0?'green':'red'}">R$ ${kpis.resultado.toFixed(2)}</strong></li>
+            <li><strong>Agrupamento:</strong> ${kpis.periodo.label}</li>
+            ${filters.payment && filters.payment.length ? `<li><strong>Forma de Pagamento:</strong> ${filters.payment.map(htmlEscape).join(', ')}</li>` : ''}
+            <li><strong>Período:</strong> ${dayjs(df[0].data).format('DD/MM/YYYY')} a ${dayjs(df[df.length-1].data).format('DD/MM/YYYY')}</li>
+            <li><strong>Transações:</strong> ${df.length}</li>
+          </ul>`;
+        document.getElementById('resumo').innerHTML = resumo;
+
+        const periodoRows = kpis.periodos.map(m=>`<tr><td>${htmlEscape(m.label)}</td><td>R$ ${m.receita.toFixed(2)}</td><td>R$ ${m.despesa.toFixed(2)}</td><td>R$ ${m.saldo.toFixed(2)}</td></tr>`).join('');
+        document.getElementById('tabela_mensal').previousElementSibling.textContent = `Balanço ${kpis.periodo.label}`;
+        document.getElementById('tabela_mensal').innerHTML = `<table><thead><tr><th>Período</th><th>Receita</th><th>Despesa</th><th>Saldo</th></tr></thead><tbody>${periodoRows}</tbody></table>`;
+
+        Plotly.newPlot('fig_mensal', [
+          { x: figs.periodos.x, y: figs.periodos.receita, type: 'bar', name: 'Receita', marker:{color:'#16a34a'} },
+          { x: figs.periodos.x, y: figs.periodos.despesa, type: 'bar', name: 'Despesa', marker:{color:'#dc2626'} },
+          { x: figs.periodos.x, y: figs.periodos.saldo, type: 'scatter', mode:'lines+markers', name: 'Saldo', line:{color:'#0ea5e9', width:3} }
+        ], { title:`Receitas, Despesas e Saldo (${kpis.periodo.label})`, barmode:'group' }, {responsive:true});
+
+        Plotly.newPlot('fig_receita_serv', [{ x: figs.receita_por_servico.map(r=>r.descricao), y: figs.receita_por_servico.map(r=>r.valor), type:'bar', marker:{color:'#22c55e'} }], { title:'Receita por Serviço', xaxis:{title:'Serviço'}, yaxis:{title:'Receita (R$)'} }, {responsive:true});
+        Plotly.newPlot('fig_pagto_rec', [{ labels: figs.pagto_receita.map(r=>r.forma_pagto), values: figs.pagto_receita.map(r=>r.valor), type:'pie' }], { title:'Receitas por Forma de Pagamento' }, {responsive:true});
+        Plotly.newPlot('fig_pagto_desp', [{ labels: figs.pagto_despesa.map(r=>r.forma_pagto), values: figs.pagto_despesa.map(r=>r.valor_abs), type:'pie' }], { title:'Despesas por Forma de Pagamento' }, {responsive:true});
+        Plotly.newPlot('fig_status', [{ x: figs.status.map(r=>r.status), y: figs.status.map(r=>r.qtd), type:'bar', marker:{color:'#3b82f6'}, text: figs.status.map(r=>r.tipo), hovertemplate:'%{x}<br>Qtd: %{y}<br>Tipo: %{text}<extra></extra>' }], { title:'Transações por Status', xaxis:{title:'Status'}, yaxis:{title:'Quantidade'} }, {responsive:true});
+        Plotly.newPlot('fig_top_desp', [{ x: figs.top_despesas.map(r=>r.label), y: figs.top_despesas.map(r=>r.valor_abs), type:'bar', marker:{color:'#f87171'} }], { title:'Top 15 Despesas Individuais', xaxis:{title:'Despesa'}, yaxis:{title:'Valor (R$)'} }, {responsive:true});
+      }
+
+      let cachedDf = [];
+
+      function populatePaymentOptions(df){
+        const valores = Array.from(new Set(df.map(r=>r.forma_pagto || 'Indefinido'))).sort((a,b)=>a.localeCompare(b));
+        paymentSelect.innerHTML = '<option value="all">Todas</option>' + valores.map(v=>`<option value="${htmlEscape(v)}">${htmlEscape(v)}</option>`).join('');
+        paymentSelect.disabled = false;
+      }
+
+      function filterByPayment(df, paymentValue){
+        if(!paymentValue || paymentValue === 'all') return { rows: df, labels: [] };
+        const selected = paymentValue.split(',').map(v=>v.trim()).filter(Boolean);
+        const filtered = df.filter(row=> selected.some(sel=> (row.forma_pagto || '').toLowerCase().includes(sel.toLowerCase())));
+        return { rows: filtered, labels: selected };
+      }
+
+      function renderReport(){
+        if(!cachedDf.length) return;
+        try{
+          statusEl.textContent = 'Processando filtros...';
+          const paymentValue = paymentSelect.value;
+          const paymentData = filterByPayment(cachedDf, paymentValue);
+          if(!paymentData.rows.length){
+            statusEl.textContent = 'Nenhuma transação encontrada para o filtro selecionado.';
+            document.getElementById('content').style.display = 'none';
+            return;
+          }
+
+          const kpis = computeKPIs(paymentData.rows, periodSelect.value);
+          const figs = buildFiguresData(paymentData.rows, kpis);
+          const filters = {};
+          if(paymentData.labels.length){
+            filters.payment = paymentData.labels;
+          }
+          renderHTML(paymentData.rows, kpis, figs, filters);
+          statusEl.textContent = 'Relatório atualizado.';
+        }catch(err){
+          console.error(err);
+          statusEl.textContent = 'Erro: '+ err;
+        }
+      }
+
+      fileInput.addEventListener('change', ()=>{
+        const hasFile = !!fileInput.files.length;
+        btn.disabled = !hasFile;
+        statusEl.textContent = hasFile ? 'Arquivo selecionado: '+fileInput.files[0].name : '';
+      });
+      btn.addEventListener('click', async ()=>{
+        try{
+          statusEl.textContent = 'Lendo e processando o CSV...';
+          const {cols, rows} = await parseCSV(fileInput.files[0]);
+          const df = loadData(cols, rows);
+          cachedDf = df;
+          populatePaymentOptions(df);
+          const paymentData = filterByPayment(df, paymentSelect.value);
+          if(!paymentData.rows.length){
+            throw new Error('Nenhuma transação disponível após aplicar os filtros.');
+          }
+          const kpis = computeKPIs(paymentData.rows, periodSelect.value);
+          const figs = buildFiguresData(paymentData.rows, kpis);
+          const filters = {};
+          if(paymentData.labels.length) filters.payment = paymentData.labels;
+          renderHTML(paymentData.rows, kpis, figs, filters);
+          statusEl.textContent = 'Relatório gerado com sucesso.';
+        }catch(err){
+          console.error(err);
+          statusEl.textContent = 'Erro: '+ err;
+        }
+      });
+
+      periodSelect.addEventListener('change', renderReport);
+      paymentSelect.addEventListener('change', renderReport);
+    </script>
+  </body>
+</html>
